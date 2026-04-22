@@ -1,6 +1,7 @@
 #!/bin/bash
-# Reads session creds from JSON file and adds a short expiration
-# so the AWS SDK re-invokes this script frequently, picking up refreshed creds.
+# Emits session creds (written by aws-from-clipboard) with a short
+# Expiration so the AWS SDK re-invokes this script frequently and picks
+# up refreshed creds. Pure bash — no python startup on every aws call.
 
 profile="${1:-default}"
 creds_file="$HOME/.aws/session-creds-${profile}.json"
@@ -10,13 +11,20 @@ if [ ! -f "$creds_file" ]; then
     exit 1
 fi
 
-# Add Expiration 60 seconds from now so SDK re-reads on next call
 expiration=$(date -u -v+60S '+%Y-%m-%dT%H:%M:%SZ')
 
-python3 -c "
-import json, sys
-with open('$creds_file') as f:
-    creds = json.load(f)
-creds['Expiration'] = '$expiration'
-json.dump(creds, sys.stdout)
-"
+# Extract each field from the controlled-format JSON we wrote ourselves.
+extract() {
+    grep -o "\"$1\": *\"[^\"]*\"" "$creds_file" | sed 's/.*: *"//; s/"$//'
+}
+ak=$(extract AccessKeyId)
+sk=$(extract SecretAccessKey)
+st=$(extract SessionToken)
+
+if [ -n "$st" ]; then
+    printf '{"Version":1,"AccessKeyId":"%s","SecretAccessKey":"%s","SessionToken":"%s","Expiration":"%s"}\n' \
+        "$ak" "$sk" "$st" "$expiration"
+else
+    printf '{"Version":1,"AccessKeyId":"%s","SecretAccessKey":"%s","Expiration":"%s"}\n' \
+        "$ak" "$sk" "$expiration"
+fi

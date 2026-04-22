@@ -1,12 +1,16 @@
 #!/bin/bash
-# Polls the clipboard once per second, appends new entries to ~/.clipboard-history,
-# and auto-runs aws-from-clipboard whenever AWS session creds land in the clipboard.
+# Polls the clipboard every POLL_INTERVAL seconds, appends new entries to
+# ~/.clipboard-history, and auto-runs aws-from-clipboard whenever AWS
+# session creds land in the clipboard.
 
-HISTORY_FILE="$HOME/.clipboard-history"
+HISTORY_FILE="${CLIPBOARD_HISTORY:-$HOME/.clipboard-history}"
 MAX_ENTRIES=50
+POLL_INTERVAL="${CLIPBOARD_POLL_INTERVAL:-0.2}"
 last=""
 
 export PATH="/usr/local/bin:/usr/bin:/bin"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 while true; do
     current=$(pbpaste)
@@ -20,18 +24,24 @@ while true; do
             [ -f "$HISTORY_FILE" ] && awk -v e="$encoded" '$0 != e' "$HISTORY_FILE"
         } | head -n "$MAX_ENTRIES" > "${HISTORY_FILE}.tmp" && mv "${HISTORY_FILE}.tmp" "$HISTORY_FILE"
 
-        if echo "$current" | grep -q "AWS_ACCESS_KEY_ID" && echo "$current" | grep -q "AWS_SECRET_ACCESS_KEY"; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] aws creds detected, running aws-from-clipboard"
+        # Bash pattern match instead of two grep subprocesses — no fork/exec on every clipboard write.
+        if [[ "$current" == *"AWS_ACCESS_KEY_ID"* && "$current" == *"AWS_SECRET_ACCESS_KEY"* ]]; then
+            log "aws creds detected, running aws-from-clipboard"
+            t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
             result=$("$HOME/.local/bin/aws-from-clipboard" 2>&1)
+            t1=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+            elapsed=$(awk "BEGIN{printf \"%.2f\", $t1 - $t0}")
             echo "$result"
+            log "aws-from-clipboard finished in ${elapsed}s"
             profile=$(printf '%s\n' "$result" | awk -F': *' '/^[[:space:]]*Profile:/{print $2; exit}')
             account=$(printf '%s\n' "$result" | awk -F': *' '/^[[:space:]]*Account:/{print $2; exit}' | awk '{print $1}')
             if [ -n "$profile" ]; then
-                osascript -e "display notification \"$account → $profile\" with title \"AWS login\"" >/dev/null 2>&1
+                # Fire notification in the background so we don't block the polling loop.
+                osascript -e "display notification \"$account → $profile\" with title \"AWS login\"" >/dev/null 2>&1 &
             else
-                osascript -e "display notification \"aws-from-clipboard failed — see /tmp/clipboard-monitor.log\" with title \"AWS login\"" >/dev/null 2>&1
+                osascript -e "display notification \"aws-from-clipboard failed — see /tmp/clipboard-monitor.log\" with title \"AWS login\"" >/dev/null 2>&1 &
             fi
         fi
     fi
-    sleep 1
+    sleep "$POLL_INTERVAL"
 done

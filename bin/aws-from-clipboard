@@ -35,15 +35,17 @@ extract_creds() {
 }
 
 identify_account() {
+    # One aws call, text output, both values parsed by bash — no python3.
     local out
     out=$(AWS_ACCESS_KEY_ID="$access_key" AWS_SECRET_ACCESS_KEY="$secret_key" \
-        AWS_SESSION_TOKEN="$session_token" aws sts get-caller-identity --output json 2>/dev/null)
-    if [ $? -ne 0 ]; then
+        AWS_SESSION_TOKEN="$session_token" \
+        aws sts get-caller-identity --query '[Account,Arn]' --output text 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$out" ]; then
         echo "Error: credentials are invalid or expired" >&2
         return 1
     fi
-    account_id=$(echo "$out" | python3 -c "import json,sys; print(json.load(sys.stdin)['Account'])")
-    arn=$(echo "$out" | python3 -c "import json,sys; print(json.load(sys.stdin)['Arn'])")
+    # aws text output tab-separates fields.
+    IFS=$'\t' read -r account_id arn <<< "$out"
     profile_name=$(lookup_profile "$account_id")
     [ -z "$profile_name" ] && profile_name="$account_id"
     profile_region=$(lookup_region "$account_id")
