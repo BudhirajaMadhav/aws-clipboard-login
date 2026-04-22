@@ -156,9 +156,10 @@ add_mapping() {  # appends one entry to profile_args or returns 1
     if has_creds "$clip"; then
         printf '  AWS creds detected on your clipboard — use them? [Y/n]: '
         local yn
-        read -r yn </dev/tty
+        read -r -n 1 yn </dev/tty
+        echo
         case "$yn" in
-            ""|[yY]*) creds="$clip" ;;
+            ""|[yY]) creds="$clip" ;;
         esac
     fi
     if [ -z "$creds" ]; then
@@ -263,9 +264,10 @@ if [ "$prompt" -eq 1 ] && [ -t 0 ]; then
     while true; do
         printf 'Add an account mapping? [y/N]: '
         yn=""
-        read -r yn </dev/tty || break
+        read -r -n 1 yn </dev/tty || break
+        echo
         case "$yn" in
-            [yY]|[yY][eE][sS])
+            [yY])
                 add_mapping || true
                 echo ""
                 ;;
