@@ -43,9 +43,11 @@ cd aws-clipboard-login
 ./install.sh
 ```
 
-With no flags, `install.sh` prompts you to add account → nickname → region
-mappings interactively. Re-run it any time to add more, or pass flags to
-skip the prompt:
+With no flags, `install.sh` walks you through adding account mappings:
+paste a short-term creds block (or confirm using whatever's on your
+clipboard), it calls `sts:GetCallerIdentity` to detect the account ID, then
+asks for a nickname and a region from a numbered dropdown. Re-run any time
+to add more, or pass flags to skip the prompt:
 
 ```
 ./install.sh \

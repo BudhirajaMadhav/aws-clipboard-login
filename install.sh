@@ -3,11 +3,12 @@
 #   - symlinks bin/ scripts into ~/.local/bin
 #   - writes the launchd plist into ~/Library/LaunchAgents and (re)loads it
 #   - seeds ~/.config/aws-clipboard-login/profiles.conf
-#   - interactively prompts for new account mappings (skip with --no-prompt)
+#   - interactively helps you add account mappings (paste creds -> detect
+#     account -> pick nickname/region); skip with --no-prompt
 #
 # Flags:
 #   --profile ACCOUNT_ID:NAME:REGION   Add/replace a mapping (repeatable).
-#   --no-prompt                        Skip the interactive "add mapping?" prompt.
+#   --no-prompt                        Skip the interactive loop.
 #   --help                             Show this message.
 #
 # Examples:
@@ -25,6 +26,124 @@ CONFIG_DIR="$HOME/.config/aws-clipboard-login"
 CONFIG_FILE="$CONFIG_DIR/profiles.conf"
 DEFAULT_REGION="${AWS_CLIPBOARD_DEFAULT_REGION:-us-east-1}"
 
+AWS_REGIONS=(
+    "us-east-1      N. Virginia"
+    "us-east-2      Ohio"
+    "us-west-1      N. California"
+    "us-west-2      Oregon"
+    "eu-west-1      Ireland"
+    "eu-west-2      London"
+    "eu-central-1   Frankfurt"
+    "eu-north-1     Stockholm"
+    "ap-south-1     Mumbai"
+    "ap-southeast-1 Singapore"
+    "ap-southeast-2 Sydney"
+    "ap-northeast-1 Tokyo"
+    "ap-northeast-2 Seoul"
+    "ca-central-1   Canada Central"
+    "sa-east-1      São Paulo"
+)
+
+has_creds() {
+    printf '%s' "$1" | grep -q "AWS_ACCESS_KEY_ID" && \
+    printf '%s' "$1" | grep -q "AWS_SECRET_ACCESS_KEY"
+}
+
+extract() {  # field_name blob -> value
+    printf '%s' "$2" | grep "$1" | head -1 | sed "s/.*$1=//" | tr -d '"'
+}
+
+detect_account() {  # ak sk st -> account_id (stdout) or empty
+    AWS_ACCESS_KEY_ID="$1" AWS_SECRET_ACCESS_KEY="$2" AWS_SESSION_TOKEN="$3" \
+        aws sts get-caller-identity --query Account --output text 2>/dev/null
+}
+
+show_regions() {
+    echo "  Regions:"
+    local i
+    for i in "${!AWS_REGIONS[@]}"; do
+        printf '    %2d) %s\n' $((i+1)) "${AWS_REGIONS[$i]}"
+    done
+    echo "    (or type any region name)"
+}
+
+resolve_region() {  # choice default -> region
+    local choice="$1" default="$2"
+    if [ -z "$choice" ]; then
+        echo "$default"
+    elif [[ "$choice" =~ ^[0-9]+$ ]]; then
+        local idx=$((choice-1))
+        if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#AWS_REGIONS[@]}" ]; then
+            echo "${AWS_REGIONS[$idx]%% *}"
+        else
+            echo "$default"
+        fi
+    else
+        echo "$choice"
+    fi
+}
+
+add_mapping() {  # appends one entry to profile_args or returns 1
+    local creds="" clip
+    clip=$(pbpaste 2>/dev/null || true)
+    if has_creds "$clip"; then
+        printf '  AWS creds detected on your clipboard — use them? [Y/n]: '
+        local yn
+        read -r yn </dev/tty
+        case "$yn" in
+            ""|[yY]*) creds="$clip" ;;
+        esac
+    fi
+    if [ -z "$creds" ]; then
+        echo "  Paste AWS short-term creds (blank line to finish):"
+        local line
+        while IFS= read -r line </dev/tty; do
+            [ -z "$line" ] && break
+            creds+="${line}"$'\n'
+        done
+    fi
+
+    local ak sk st
+    ak=$(extract AWS_ACCESS_KEY_ID "$creds")
+    sk=$(extract AWS_SECRET_ACCESS_KEY "$creds")
+    st=$(extract AWS_SESSION_TOKEN "$creds")
+    if [ -z "$ak" ] || [ -z "$sk" ]; then
+        echo "  ✗ Couldn't find AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY — skipped"
+        return 1
+    fi
+
+    local acct
+    acct=$(detect_account "$ak" "$sk" "$st")
+    if [ -z "$acct" ]; then
+        echo "  ✗ sts:GetCallerIdentity rejected those creds (invalid or expired) — skipped"
+        return 1
+    fi
+    echo "  ✓ Account: $acct"
+
+    local existing_name existing_region
+    existing_name=$(awk -v a="$acct" '!/^[[:space:]]*#/ && NF>=2 && $1==a {print $2; exit}' "$CONFIG_FILE" 2>/dev/null || true)
+    existing_region=$(awk -v a="$acct" '!/^[[:space:]]*#/ && NF>=3 && $1==a {print $3; exit}' "$CONFIG_FILE" 2>/dev/null || true)
+
+    local default_name="${existing_name:-$acct}"
+    printf '  Nickname [%s]: ' "$default_name"
+    local name
+    read -r name </dev/tty
+    [ -z "$name" ] && name="$default_name"
+
+    local default_region="${existing_region:-$DEFAULT_REGION}"
+    show_regions
+    printf '  Region [%s]: ' "$default_region"
+    local choice
+    read -r choice </dev/tty
+    local region
+    region=$(resolve_region "$choice" "$default_region")
+
+    profile_args+=("$acct:$name:$region")
+    echo "  ✓ Added: $acct → $name ($region)"
+}
+
+# --- arg parsing ---------------------------------------------------
+
 profile_args=()
 prompt=1
 while [ $# -gt 0 ]; do
@@ -40,7 +159,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -50,6 +169,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# --- install --------------------------------------------------------
+
 mkdir -p "$BIN_DIR" "$AGENTS_DIR" "$HOME/.aws" "$CONFIG_DIR"
 
 for f in clipboard-monitor aws-from-clipboard aws-cred-process; do
@@ -58,13 +179,13 @@ for f in clipboard-monitor aws-from-clipboard aws-cred-process; do
     echo "  linked $BIN_DIR/$f → $PROJECT_DIR/bin/$f"
 done
 
-# Seed the config once; never clobber an existing one.
 if [ ! -f "$CONFIG_FILE" ]; then
     cp "$PROJECT_DIR/config/profiles.conf.sample" "$CONFIG_FILE"
     echo "  wrote   $CONFIG_FILE"
 fi
 
-# Interactive prompt: only if stdin is a TTY and no --profile / --no-prompt was passed.
+# --- interactive loop ----------------------------------------------
+
 if [ "$prompt" -eq 1 ] && [ -t 0 ]; then
     existing=$(awk '!/^[[:space:]]*#/ && NF>=2' "$CONFIG_FILE" 2>/dev/null || true)
     echo ""
@@ -78,26 +199,20 @@ if [ "$prompt" -eq 1 ] && [ -t 0 ]; then
     fi
     while true; do
         printf 'Add an account mapping? [y/N]: '
+        yn=""
         read -r yn </dev/tty || break
         case "$yn" in
             [yY]|[yY][eE][sS])
-                printf '  AWS account ID:     '; read -r acct </dev/tty
-                printf '  Nickname:           '; read -r name </dev/tty
-                printf "  Region [%s]: " "$DEFAULT_REGION"; read -r region </dev/tty
-                [ -z "$region" ] && region="$DEFAULT_REGION"
-                if [ -z "$acct" ] || [ -z "$name" ]; then
-                    echo "  ✗ skipped — account ID and nickname are required"
-                    continue
-                fi
-                profile_args+=("$acct:$name:$region")
+                add_mapping || true
+                echo ""
                 ;;
             *) break ;;
         esac
     done
-    echo ""
 fi
 
-# Apply --profile entries (both CLI-passed and interactively collected).
+# --- write config, plist, load agent -------------------------------
+
 for entry in "${profile_args[@]+"${profile_args[@]}"}"; do
     IFS=':' read -r acct name region <<< "$entry"
     if [ -z "${acct:-}" ] || [ -z "${name:-}" ] || [ -z "${region:-}" ]; then
@@ -108,10 +223,8 @@ for entry in "${profile_args[@]+"${profile_args[@]}"}"; do
     awk -v a="$acct" '!/^[[:space:]]*#/ && NF>=1 && $1==a {next} {print}' "$CONFIG_FILE" > "$tmp"
     mv "$tmp" "$CONFIG_FILE"
     printf '%s  %s  %s\n' "$acct" "$name" "$region" >> "$CONFIG_FILE"
-    echo "  added   $acct → $name ($region)"
 done
 
-# Render plist with absolute path (launchd wants a real path, not a symlink target).
 sed "s|__BIN_DIR__|$BIN_DIR|g" \
     "$PROJECT_DIR/launchd/$PLIST_NAME" > "$PLIST_DEST"
 echo "  wrote   $PLIST_DEST"
