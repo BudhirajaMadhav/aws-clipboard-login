@@ -226,6 +226,38 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# --- preflight -----------------------------------------------------
+
+missing_required=0
+check_required() {  # name install-hint
+    if command -v "$1" >/dev/null 2>&1; then
+        echo "  ✓ $1"
+    else
+        echo "  ✗ $1 — $2" >&2
+        missing_required=1
+    fi
+}
+check_optional() {  # name install-hint purpose
+    if command -v "$1" >/dev/null 2>&1; then
+        echo "  ✓ $1"
+    else
+        echo "  ! $1 — $2 ($3)"
+    fi
+}
+
+echo "Dependencies:"
+check_required aws "install via https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+check_required python3 "install via 'brew install python' or use the macOS built-in"
+check_required pbpaste "macOS built-in — something's very wrong if this is missing"
+check_optional fzf "brew install fzf" "arrow-key region picker; numbered fallback otherwise"
+
+if [ "$missing_required" = "1" ]; then
+    echo "" >&2
+    echo "error: required dependencies missing — aborting." >&2
+    exit 1
+fi
+echo ""
+
 # --- install --------------------------------------------------------
 
 mkdir -p "$BIN_DIR" "$AGENTS_DIR" "$HOME/.aws" "$CONFIG_DIR"

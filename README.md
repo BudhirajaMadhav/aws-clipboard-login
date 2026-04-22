@@ -31,11 +31,23 @@ automatically — no `export AWS_…` dance, no re-login when switching accounts
 
 ## Requirements
 
-- macOS (uses `pbpaste`, `osascript`, `launchd`)
-- `aws` CLI on `PATH`
-- `python3` (ships with macOS)
-- `fzf` (optional, for arrow-key region picker during interactive install —
-  `brew install fzf`; a numbered prompt is used as fallback)
+**Platform**: macOS — the tool uses `pbpaste`, `osascript`, and `launchd`.
+
+**Runtime dependencies**:
+
+| Tool | Why | Install |
+|------|-----|---------|
+| `aws` CLI | identifies the account via `sts:GetCallerIdentity` | `brew install awscli` (or [AWS docs](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)) |
+| `python3` | JSON parsing in `aws-from-clipboard` / `aws-cred-process` | ships with macOS |
+
+**Recommended**:
+
+| Tool | Why | Install |
+|------|-----|---------|
+| `fzf` | arrow-key region picker during the interactive install (numbered prompt is used as fallback) | `brew install fzf` |
+
+`install.sh` runs a preflight check and bails early if a required
+dependency is missing.
 
 ## Install
 
