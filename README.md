@@ -34,6 +34,8 @@ automatically — no `export AWS_…` dance, no re-login when switching accounts
 - macOS (uses `pbpaste`, `osascript`, `launchd`)
 - `aws` CLI on `PATH`
 - `python3` (ships with macOS)
+- `fzf` (optional, for arrow-key region picker during interactive install —
+  `brew install fzf`; a numbered prompt is used as fallback)
 
 ## Install
 

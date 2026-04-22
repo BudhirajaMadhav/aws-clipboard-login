@@ -49,23 +49,13 @@ has_creds() {
     printf '%s' "$1" | grep -q "AWS_SECRET_ACCESS_KEY"
 }
 
-# Read a single key from /dev/tty silently. If the key is ESC, drain any
-# trailing CSI bytes (e.g. "[B" from a stray arrow press) so they don't
-# leak into the next prompt. Writes the consumed printable char (or empty
-# string for ESC / Enter) to stdout.
-#
-# Uses stty raw mode for the whole lifetime so the kernel tty buffer
-# doesn't flush escape-sequence bytes between reads.
+# Read a single key silently. If it's ESC, drain any trailing CSI bytes
+# (e.g. stray arrow press) so they can't leak into the next prompt.
 read_key() {
-    local k stty_saved=""
-    stty_saved=$(stty -g </dev/tty 2>/dev/null) || true
-    [ -n "$stty_saved" ] && stty -echo -icanon min 1 time 0 </dev/tty 2>/dev/null
-    trap '[ -n "$stty_saved" ] && stty "$stty_saved" </dev/tty 2>/dev/null' EXIT
-
-    IFS= read -r -n 1 k </dev/tty || return 1
+    local k
+    IFS= read -r -s -n 1 k </dev/tty || return 1
     if [ "$k" = $'\x1b' ]; then
-        IFS= read -r -n 1 -t 1 _ </dev/tty 2>/dev/null || true
-        IFS= read -r -n 1 -t 1 _ </dev/tty 2>/dev/null || true
+        IFS= read -r -s -n 2 -t 1 _ </dev/tty 2>/dev/null || true
         printf ''
     else
         printf '%s' "$k"
@@ -106,83 +96,51 @@ resolve_region() {  # choice default -> region
     fi
 }
 
-# Interactive arrow-key picker. Writes the selected region code to stdout;
-# all UI goes to stderr so the caller can still capture via $(pick_region …).
+# Region picker. Uses fzf when available (arrow keys + type-to-filter);
+# falls back to a numbered prompt otherwise. Writes the selected region
+# code to stdout so callers can capture via $(pick_region …).
 pick_region() {
     local default="$1"
-    local idx=0 i key rest n=${#AWS_REGIONS[@]}
-
-    for i in "${!AWS_REGIONS[@]}"; do
-        [[ "${AWS_REGIONS[$i]%% *}" == "$default" ]] && { idx=$i; break; }
-    done
-
-    # Fall back to numbered prompt if stderr isn't a TTY (no ANSI → broken UI).
-    if ! [ -t 2 ]; then
+    if command -v fzf >/dev/null 2>&1 && [ -t 2 ]; then
+        pick_region_fzf "$default"
+    else
+        [ -t 2 ] && [ ! -x "$(command -v fzf 2>/dev/null)" ] && \
+            echo "  (tip: install fzf for arrow-key navigation — brew install fzf)" >&2
         show_regions
         printf '  Region [%s]: ' "$default" >&2
         local choice
         read -r choice </dev/tty
         resolve_region "$choice" "$default"
-        return
     fi
+}
 
-    printf '  (↑/↓ or j/k to navigate, enter to select, q to keep %s)\n' "$default" >&2
-
-    # Save tty state and go raw for the whole picker lifetime, so the kernel
-    # buffer holds the ESC sequence intact instead of flushing on mode flips.
-    local stty_saved=""
-    stty_saved=$(stty -g </dev/tty 2>/dev/null) || true
-    [ -n "$stty_saved" ] && stty -echo -icanon min 1 time 0 </dev/tty 2>/dev/null
-    tput civis >&2
-    trap 'tput cnorm 2>/dev/null; [ -n "$stty_saved" ] && stty "$stty_saved" </dev/tty 2>/dev/null' EXIT
-    trap 'tput cnorm 2>/dev/null; [ -n "$stty_saved" ] && stty "$stty_saved" </dev/tty 2>/dev/null; exit 130' INT
-
-    _pr_render() {
-        for i in "${!AWS_REGIONS[@]}"; do
-            if [ "$i" -eq "$idx" ]; then
-                printf '  \033[7m❯ %s\033[0m\n' "${AWS_REGIONS[$i]}" >&2
-            else
-                printf '    %s\n' "${AWS_REGIONS[$i]}" >&2
-            fi
-        done
-    }
-
-    _pr_render
-    local changed=0 c1 c2
-    while true; do
-        IFS= read -r -n 1 key </dev/tty
-        changed=0
-        case "$key" in
-            $'\x1b')
-                # In raw mode the trailing bytes are already buffered. Short
-                # timeout lets bare ESC still resolve to "cancel".
-                IFS= read -r -n 1 -t 1 c1 </dev/tty 2>/dev/null || c1=""
-                IFS= read -r -n 1 -t 1 c2 </dev/tty 2>/dev/null || c2=""
-                case "${c1}${c2}" in
-                    '[A'|'OA') [ $idx -gt 0 ] && { idx=$((idx-1)); changed=1; } ;;
-                    '[B'|'OB') [ $idx -lt $((n-1)) ] && { idx=$((idx+1)); changed=1; } ;;
-                    *)
-                        echo "$default"
-                        return
-                        ;;
-                esac
-                ;;
-            k) [ $idx -gt 0 ] && { idx=$((idx-1)); changed=1; } ;;
-            j) [ $idx -lt $((n-1)) ] && { idx=$((idx+1)); changed=1; } ;;
-            $'\r'|$'\n'|'')
-                echo "${AWS_REGIONS[$idx]%% *}"
-                return
-                ;;
-            q|Q)
-                echo "$default"
-                return
-                ;;
-        esac
-        if [ "$changed" = "1" ]; then
-            printf '\033[%dA' "$n" >&2
-            _pr_render
+pick_region_fzf() {
+    local default="$1"
+    # Build the list with the default first so Enter keeps the default.
+    local ordered=() matched="" r
+    for r in "${AWS_REGIONS[@]}"; do
+        if [[ "${r%% *}" == "$default" ]]; then
+            matched="$r"
+        else
+            ordered+=("$r")
         fi
     done
+    [ -n "$matched" ] && ordered=("$matched" "${ordered[@]}")
+
+    local selection
+    selection=$(printf '%s\n' "${ordered[@]}" | fzf \
+        --height=40% \
+        --reverse \
+        --no-sort \
+        --prompt='Region ❯ ' \
+        --header="↑/↓ navigate · type to filter · enter select · esc keep $default" \
+        --no-info) || selection=""
+
+    if [ -z "$selection" ]; then
+        echo "$default"
+    else
+        echo "${selection%% *}"
+    fi
 }
 
 add_mapping() {  # appends one entry to profile_args or returns 1
