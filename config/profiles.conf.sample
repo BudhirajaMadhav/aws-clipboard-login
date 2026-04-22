@@ -1,0 +1,12 @@
+# aws-clipboard-login — account → profile/region mapping
+#
+# One entry per line:
+#   ACCOUNT_ID  PROFILE_NAME  REGION
+#
+# Accounts that aren't listed here still work — they're registered under a
+# profile named after the account ID, in the default region (us-east-1 unless
+# AWS_CLIPBOARD_DEFAULT_REGION is set).
+#
+# Examples (uncomment and edit):
+# 123456789012  dev    us-east-1
+# 210987654321  prod   eu-west-1

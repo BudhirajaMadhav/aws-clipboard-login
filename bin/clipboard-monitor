@@ -1,0 +1,37 @@
+#!/bin/bash
+# Polls the clipboard once per second, appends new entries to ~/.clipboard-history,
+# and auto-runs aws-from-clipboard whenever AWS session creds land in the clipboard.
+
+HISTORY_FILE="$HOME/.clipboard-history"
+MAX_ENTRIES=50
+last=""
+
+export PATH="/usr/local/bin:/usr/bin:/bin"
+
+while true; do
+    current=$(pbpaste)
+    if [ -n "$current" ] && [ "$current" != "$last" ]; then
+        last="$current"
+        encoded=$(printf '%s' "$current" | base64)
+        # Prepend new entry, drop duplicates, keep MAX_ENTRIES.
+        # awk (not grep) — BSD grep OOMs on very long single lines.
+        {
+            echo "$encoded"
+            [ -f "$HISTORY_FILE" ] && awk -v e="$encoded" '$0 != e' "$HISTORY_FILE"
+        } | head -n "$MAX_ENTRIES" > "${HISTORY_FILE}.tmp" && mv "${HISTORY_FILE}.tmp" "$HISTORY_FILE"
+
+        if echo "$current" | grep -q "AWS_ACCESS_KEY_ID" && echo "$current" | grep -q "AWS_SECRET_ACCESS_KEY"; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] aws creds detected, running aws-from-clipboard"
+            result=$("$HOME/.local/bin/aws-from-clipboard" 2>&1)
+            echo "$result"
+            profile=$(printf '%s\n' "$result" | awk -F': *' '/^[[:space:]]*Profile:/{print $2; exit}')
+            account=$(printf '%s\n' "$result" | awk -F': *' '/^[[:space:]]*Account:/{print $2; exit}' | awk '{print $1}')
+            if [ -n "$profile" ]; then
+                osascript -e "display notification \"$account → $profile\" with title \"AWS login\"" >/dev/null 2>&1
+            else
+                osascript -e "display notification \"aws-from-clipboard failed — see /tmp/clipboard-monitor.log\" with title \"AWS login\"" >/dev/null 2>&1
+            fi
+        fi
+    fi
+    sleep 1
+done

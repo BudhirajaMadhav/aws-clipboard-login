@@ -1,0 +1,127 @@
+#!/bin/bash
+# Reads AWS short-term credentials from the clipboard (or recent clipboard
+# history), identifies the account via `aws sts get-caller-identity`, and
+# registers them as a `credential_process`-backed AWS profile.
+#
+# Account → profile/region mapping lives in $AWS_CLIPBOARD_CONFIG
+# (default: ~/.config/aws-clipboard-login/profiles.conf).
+
+HISTORY_FILE="${CLIPBOARD_HISTORY:-$HOME/.clipboard-history}"
+AWS_CONFIG="$HOME/.aws/config"
+CREDS_DIR="$HOME/.aws"
+CONFIG_FILE="${AWS_CLIPBOARD_CONFIG:-$HOME/.config/aws-clipboard-login/profiles.conf}"
+DEFAULT_REGION="${AWS_CLIPBOARD_DEFAULT_REGION:-us-east-1}"
+
+lookup_profile() {
+    local acct="$1"
+    if [ -f "$CONFIG_FILE" ]; then
+        awk -v a="$acct" '!/^[[:space:]]*#/ && NF>=2 && $1==a {print $2; exit}' "$CONFIG_FILE"
+    fi
+}
+
+lookup_region() {
+    local acct="$1"
+    if [ -f "$CONFIG_FILE" ]; then
+        awk -v a="$acct" '!/^[[:space:]]*#/ && NF>=3 && $1==a {print $3; exit}' "$CONFIG_FILE"
+    fi
+}
+
+extract_creds() {
+    local content="$1"
+    access_key=$(echo "$content" | grep "AWS_ACCESS_KEY_ID" | sed 's/.*AWS_ACCESS_KEY_ID=//')
+    secret_key=$(echo "$content" | grep "AWS_SECRET_ACCESS_KEY" | sed 's/.*AWS_SECRET_ACCESS_KEY=//')
+    session_token=$(echo "$content" | grep "AWS_SESSION_TOKEN" | sed 's/.*AWS_SESSION_TOKEN=//')
+    [ -n "$access_key" ] && [ -n "$secret_key" ]
+}
+
+identify_account() {
+    local out
+    out=$(AWS_ACCESS_KEY_ID="$access_key" AWS_SECRET_ACCESS_KEY="$secret_key" \
+        AWS_SESSION_TOKEN="$session_token" aws sts get-caller-identity --output json 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo "Error: credentials are invalid or expired" >&2
+        return 1
+    fi
+    account_id=$(echo "$out" | python3 -c "import json,sys; print(json.load(sys.stdin)['Account'])")
+    arn=$(echo "$out" | python3 -c "import json,sys; print(json.load(sys.stdin)['Arn'])")
+    profile_name=$(lookup_profile "$account_id")
+    [ -z "$profile_name" ] && profile_name="$account_id"
+    profile_region=$(lookup_region "$account_id")
+    [ -z "$profile_region" ] && profile_region="$DEFAULT_REGION"
+}
+
+write_creds() {
+    local creds_file="$CREDS_DIR/session-creds-${profile_name}.json"
+    if [ -n "$session_token" ]; then
+        cat > "$creds_file" <<EOF
+{
+  "Version": 1,
+  "AccessKeyId": "$access_key",
+  "SecretAccessKey": "$secret_key",
+  "SessionToken": "$session_token"
+}
+EOF
+    else
+        cat > "$creds_file" <<EOF
+{
+  "Version": 1,
+  "AccessKeyId": "$access_key",
+  "SecretAccessKey": "$secret_key"
+}
+EOF
+    fi
+}
+
+ensure_profile() {
+    local profile_block
+    if [ "$profile_name" = "default" ]; then
+        profile_block="[default]"
+    else
+        profile_block="[profile ${profile_name}]"
+    fi
+
+    if ! grep -qF "$profile_block" "$AWS_CONFIG" 2>/dev/null; then
+        local cred_process="credential_process = $HOME/.local/bin/aws-cred-process ${profile_name}"
+        printf '\n%s\nregion = %s\n%s\n' "$profile_block" "$profile_region" "$cred_process" >> "$AWS_CONFIG"
+    fi
+}
+
+process_creds() {
+    local label="$1"
+    if ! identify_account; then
+        exit 1
+    fi
+    write_creds
+    ensure_profile
+    # Also set as default (last login wins)
+    cp "$CREDS_DIR/session-creds-${profile_name}.json" "$CREDS_DIR/session-creds-default.json"
+    echo "✓ Account: $account_id ($profile_name)"
+    echo "  ARN:     $arn"
+    echo "  Profile: $profile_name"
+    echo "  Region:  $profile_region"
+    echo "  Use:     export AWS_PROFILE=$profile_name"
+    if [ -n "$label" ]; then
+        echo "  Source:  $label"
+    fi
+}
+
+current=$(pbpaste)
+if extract_creds "$current"; then
+    process_creds "clipboard"
+    exit 0
+fi
+
+if [ -f "$HISTORY_FILE" ]; then
+    index=0
+    while IFS= read -r encoded; do
+        index=$((index + 1))
+        entry=$(echo "$encoded" | base64 --decode)
+        if extract_creds "$entry"; then
+            process_creds "history entry #${index}"
+            exit 0
+        fi
+    done < "$HISTORY_FILE"
+fi
+
+echo "Error: Could not find AWS credentials in clipboard or recent history"
+exit 1
