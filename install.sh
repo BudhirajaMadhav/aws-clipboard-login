@@ -49,6 +49,21 @@ has_creds() {
     printf '%s' "$1" | grep -q "AWS_SECRET_ACCESS_KEY"
 }
 
+# Read a single key from /dev/tty silently. If the key is ESC, drain any
+# trailing CSI bytes (e.g. "[B" from a stray arrow press) so they don't
+# leak into the next prompt. Writes the consumed printable char (or empty
+# string for ESC / Enter) to stdout.
+read_key() {
+    local k rest
+    IFS= read -r -s -n 1 k </dev/tty || return 1
+    if [ "$k" = $'\x1b' ]; then
+        IFS= read -r -s -N 2 -t 1 rest </dev/tty 2>/dev/null || true
+        printf ''
+    else
+        printf '%s' "$k"
+    fi
+}
+
 extract() {  # field_name blob -> value
     printf '%s' "$2" | grep "$1" | head -1 | sed "s/.*$1=//" | tr -d '"'
 }
@@ -103,7 +118,7 @@ pick_region() {
         return
     fi
 
-    printf '  (↑/↓ to navigate, enter to select, q to keep %s)\n' "$default" >&2
+    printf '  (↑/↓ or j/k to navigate, enter to select, q to keep %s)\n' "$default" >&2
     tput civis >&2
     # Restore cursor on INT; picker's other exit paths restore it themselves.
     trap 'tput cnorm 2>/dev/null; exit 130' INT
@@ -119,23 +134,31 @@ pick_region() {
     }
 
     _pr_render
+    local changed=0
     while true; do
         IFS= read -r -s -n 1 key </dev/tty
+        changed=0
         case "$key" in
             $'\x1b')
-                IFS= read -r -s -N 2 -t 1 rest </dev/tty 2>/dev/null || rest=""
+                # Try to read the rest of a CSI ("[X") or SS3 ("OX") sequence.
+                rest=""
+                IFS= read -r -s -N 1 -t 1 c1 </dev/tty 2>/dev/null || c1=""
+                if [ -n "$c1" ]; then
+                    IFS= read -r -s -N 1 -t 1 c2 </dev/tty 2>/dev/null || c2=""
+                    rest="${c1}${c2}"
+                fi
                 case "$rest" in
-                    '[A') [ $idx -gt 0 ] && idx=$((idx-1)) ;;
-                    '[B') [ $idx -lt $((n-1)) ] && idx=$((idx+1)) ;;
-                    *)
+                    '[A'|'OA') [ $idx -gt 0 ] && { idx=$((idx-1)); changed=1; } ;;
+                    '[B'|'OB') [ $idx -lt $((n-1)) ] && { idx=$((idx+1)); changed=1; } ;;
+                    *)  # bare ESC or unrecognized sequence → cancel
                         tput cnorm >&2; trap - INT
                         echo "$default"
                         return
                         ;;
                 esac
-                printf '\033[%dA' "$n" >&2
-                _pr_render
                 ;;
+            k) [ $idx -gt 0 ] && { idx=$((idx-1)); changed=1; } ;;
+            j) [ $idx -lt $((n-1)) ] && { idx=$((idx+1)); changed=1; } ;;
             '')
                 tput cnorm >&2; trap - INT
                 echo "${AWS_REGIONS[$idx]%% *}"
@@ -147,6 +170,10 @@ pick_region() {
                 return
                 ;;
         esac
+        if [ "$changed" = "1" ]; then
+            printf '\033[%dA' "$n" >&2
+            _pr_render
+        fi
     done
 }
 
@@ -156,8 +183,8 @@ add_mapping() {  # appends one entry to profile_args or returns 1
     if has_creds "$clip"; then
         printf '  AWS creds detected on your clipboard — use them? [Y/n]: '
         local yn
-        read -r -n 1 yn </dev/tty
-        echo
+        yn=$(read_key)
+        printf '%s\n' "$yn"
         case "$yn" in
             ""|[yY]) creds="$clip" ;;
         esac
@@ -263,9 +290,8 @@ if [ "$prompt" -eq 1 ] && [ -t 0 ]; then
     fi
     while true; do
         printf 'Add an account mapping? [y/N]: '
-        yn=""
-        read -r -n 1 yn </dev/tty || break
-        echo
+        yn=$(read_key)
+        printf '%s\n' "$yn"
         case "$yn" in
             [yY])
                 add_mapping || true
