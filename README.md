@@ -38,24 +38,33 @@ automatically — no `export AWS_…` dance, no re-login when switching accounts
 ## Install
 
 ```
-git clone https://github.com/<you>/aws-clipboard-login.git
+git clone https://github.com/BudhirajaMadhav/aws-clipboard-login.git
 cd aws-clipboard-login
+./install.sh
+```
+
+With no flags, `install.sh` prompts you to add account → nickname → region
+mappings interactively. Re-run it any time to add more, or pass flags to
+skip the prompt:
+
+```
 ./install.sh \
     --profile 123456789012:dev:us-east-1 \
     --profile 210987654321:prod:eu-west-1
+./install.sh --no-prompt    # CI / silent re-install
 ```
 
-The `--profile` flags are optional and repeatable. You can also edit
-`~/.config/aws-clipboard-login/profiles.conf` directly afterwards — format is:
+The mappings live in `~/.config/aws-clipboard-login/profiles.conf` — feel
+free to edit directly:
 
 ```
 # ACCOUNT_ID  PROFILE_NAME  REGION
 123456789012  dev           us-east-1
 ```
 
-Accounts not listed in the config still work — they get registered under a
-profile named after the account ID, in `AWS_CLIPBOARD_DEFAULT_REGION`
-(defaults to `us-east-1`).
+Accounts not listed still work — they get registered under a profile named
+after the account ID, in `AWS_CLIPBOARD_DEFAULT_REGION` (default
+`us-east-1`).
 
 ## Use
 
