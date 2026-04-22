@@ -59,12 +59,12 @@ detect_account() {  # ak sk st -> account_id (stdout) or empty
 }
 
 show_regions() {
-    echo "  Regions:"
+    echo "  Regions:" >&2
     local i
     for i in "${!AWS_REGIONS[@]}"; do
-        printf '    %2d) %s\n' $((i+1)) "${AWS_REGIONS[$i]}"
+        printf '    %2d) %s\n' $((i+1)) "${AWS_REGIONS[$i]}" >&2
     done
-    echo "    (or type any region name)"
+    echo "    (or type any region name)" >&2
 }
 
 resolve_region() {  # choice default -> region
@@ -81,6 +81,73 @@ resolve_region() {  # choice default -> region
     else
         echo "$choice"
     fi
+}
+
+# Interactive arrow-key picker. Writes the selected region code to stdout;
+# all UI goes to stderr so the caller can still capture via $(pick_region …).
+pick_region() {
+    local default="$1"
+    local idx=0 i key rest n=${#AWS_REGIONS[@]}
+
+    for i in "${!AWS_REGIONS[@]}"; do
+        [[ "${AWS_REGIONS[$i]%% *}" == "$default" ]] && { idx=$i; break; }
+    done
+
+    # Fall back to numbered prompt if stderr isn't a TTY (no ANSI → broken UI).
+    if ! [ -t 2 ]; then
+        show_regions
+        printf '  Region [%s]: ' "$default" >&2
+        local choice
+        read -r choice </dev/tty
+        resolve_region "$choice" "$default"
+        return
+    fi
+
+    printf '  (↑/↓ to navigate, enter to select, q to keep %s)\n' "$default" >&2
+    tput civis >&2
+    # Restore cursor on INT; picker's other exit paths restore it themselves.
+    trap 'tput cnorm 2>/dev/null; exit 130' INT
+
+    _pr_render() {
+        for i in "${!AWS_REGIONS[@]}"; do
+            if [ "$i" -eq "$idx" ]; then
+                printf '  \033[7m❯ %s\033[0m\n' "${AWS_REGIONS[$i]}" >&2
+            else
+                printf '    %s\n' "${AWS_REGIONS[$i]}" >&2
+            fi
+        done
+    }
+
+    _pr_render
+    while true; do
+        IFS= read -r -s -n 1 key </dev/tty
+        case "$key" in
+            $'\x1b')
+                IFS= read -r -s -N 2 -t 1 rest </dev/tty 2>/dev/null || rest=""
+                case "$rest" in
+                    '[A') [ $idx -gt 0 ] && idx=$((idx-1)) ;;
+                    '[B') [ $idx -lt $((n-1)) ] && idx=$((idx+1)) ;;
+                    *)
+                        tput cnorm >&2; trap - INT
+                        echo "$default"
+                        return
+                        ;;
+                esac
+                printf '\033[%dA' "$n" >&2
+                _pr_render
+                ;;
+            '')
+                tput cnorm >&2; trap - INT
+                echo "${AWS_REGIONS[$idx]%% *}"
+                return
+                ;;
+            q|Q)
+                tput cnorm >&2; trap - INT
+                echo "$default"
+                return
+                ;;
+        esac
+    done
 }
 
 add_mapping() {  # appends one entry to profile_args or returns 1
@@ -131,12 +198,8 @@ add_mapping() {  # appends one entry to profile_args or returns 1
     [ -z "$name" ] && name="$default_name"
 
     local default_region="${existing_region:-$DEFAULT_REGION}"
-    show_regions
-    printf '  Region [%s]: ' "$default_region"
-    local choice
-    read -r choice </dev/tty
     local region
-    region=$(resolve_region "$choice" "$default_region")
+    region=$(pick_region "$default_region")
 
     profile_args+=("$acct:$name:$region")
     echo "  ✓ Added: $acct → $name ($region)"
