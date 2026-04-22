@@ -46,10 +46,14 @@ identify_account() {
     fi
     # aws text output tab-separates fields.
     IFS=$'\t' read -r account_id arn <<< "$out"
+    # Parameter expansion defaults so these assignments always exit 0 —
+    # the old `[ -z "$X" ] && X=fallback` pattern made the function
+    # return 1 whenever the lookup was non-empty (mapped account), which
+    # broke `process_creds`'s `if ! identify_account; then exit 1`.
     profile_name=$(lookup_profile "$account_id")
-    [ -z "$profile_name" ] && profile_name="$account_id"
+    profile_name="${profile_name:-$account_id}"
     profile_region=$(lookup_region "$account_id")
-    [ -z "$profile_region" ] && profile_region="$DEFAULT_REGION"
+    profile_region="${profile_region:-$DEFAULT_REGION}"
 }
 
 write_creds() {
