@@ -53,11 +53,19 @@ has_creds() {
 # trailing CSI bytes (e.g. "[B" from a stray arrow press) so they don't
 # leak into the next prompt. Writes the consumed printable char (or empty
 # string for ESC / Enter) to stdout.
+#
+# Uses stty raw mode for the whole lifetime so the kernel tty buffer
+# doesn't flush escape-sequence bytes between reads.
 read_key() {
-    local k rest
-    IFS= read -r -s -n 1 k </dev/tty || return 1
+    local k stty_saved=""
+    stty_saved=$(stty -g </dev/tty 2>/dev/null) || true
+    [ -n "$stty_saved" ] && stty -echo -icanon min 1 time 0 </dev/tty 2>/dev/null
+    trap '[ -n "$stty_saved" ] && stty "$stty_saved" </dev/tty 2>/dev/null' EXIT
+
+    IFS= read -r -n 1 k </dev/tty || return 1
     if [ "$k" = $'\x1b' ]; then
-        IFS= read -r -s -N 2 -t 1 rest </dev/tty 2>/dev/null || true
+        IFS= read -r -n 1 -t 1 _ </dev/tty 2>/dev/null || true
+        IFS= read -r -n 1 -t 1 _ </dev/tty 2>/dev/null || true
         printf ''
     else
         printf '%s' "$k"
@@ -119,9 +127,15 @@ pick_region() {
     fi
 
     printf '  (↑/↓ or j/k to navigate, enter to select, q to keep %s)\n' "$default" >&2
+
+    # Save tty state and go raw for the whole picker lifetime, so the kernel
+    # buffer holds the ESC sequence intact instead of flushing on mode flips.
+    local stty_saved=""
+    stty_saved=$(stty -g </dev/tty 2>/dev/null) || true
+    [ -n "$stty_saved" ] && stty -echo -icanon min 1 time 0 </dev/tty 2>/dev/null
     tput civis >&2
-    # Restore cursor on INT; picker's other exit paths restore it themselves.
-    trap 'tput cnorm 2>/dev/null; exit 130' INT
+    trap 'tput cnorm 2>/dev/null; [ -n "$stty_saved" ] && stty "$stty_saved" </dev/tty 2>/dev/null' EXIT
+    trap 'tput cnorm 2>/dev/null; [ -n "$stty_saved" ] && stty "$stty_saved" </dev/tty 2>/dev/null; exit 130' INT
 
     _pr_render() {
         for i in "${!AWS_REGIONS[@]}"; do
@@ -134,24 +148,20 @@ pick_region() {
     }
 
     _pr_render
-    local changed=0
+    local changed=0 c1 c2
     while true; do
-        IFS= read -r -s -n 1 key </dev/tty
+        IFS= read -r -n 1 key </dev/tty
         changed=0
         case "$key" in
             $'\x1b')
-                # Try to read the rest of a CSI ("[X") or SS3 ("OX") sequence.
-                rest=""
-                IFS= read -r -s -N 1 -t 1 c1 </dev/tty 2>/dev/null || c1=""
-                if [ -n "$c1" ]; then
-                    IFS= read -r -s -N 1 -t 1 c2 </dev/tty 2>/dev/null || c2=""
-                    rest="${c1}${c2}"
-                fi
-                case "$rest" in
+                # In raw mode the trailing bytes are already buffered. Short
+                # timeout lets bare ESC still resolve to "cancel".
+                IFS= read -r -n 1 -t 1 c1 </dev/tty 2>/dev/null || c1=""
+                IFS= read -r -n 1 -t 1 c2 </dev/tty 2>/dev/null || c2=""
+                case "${c1}${c2}" in
                     '[A'|'OA') [ $idx -gt 0 ] && { idx=$((idx-1)); changed=1; } ;;
                     '[B'|'OB') [ $idx -lt $((n-1)) ] && { idx=$((idx+1)); changed=1; } ;;
-                    *)  # bare ESC or unrecognized sequence → cancel
-                        tput cnorm >&2; trap - INT
+                    *)
                         echo "$default"
                         return
                         ;;
@@ -159,13 +169,11 @@ pick_region() {
                 ;;
             k) [ $idx -gt 0 ] && { idx=$((idx-1)); changed=1; } ;;
             j) [ $idx -lt $((n-1)) ] && { idx=$((idx+1)); changed=1; } ;;
-            '')
-                tput cnorm >&2; trap - INT
+            $'\r'|$'\n'|'')
                 echo "${AWS_REGIONS[$idx]%% *}"
                 return
                 ;;
             q|Q)
-                tput cnorm >&2; trap - INT
                 echo "$default"
                 return
                 ;;
